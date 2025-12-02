@@ -1,187 +1,111 @@
 import pandas as pd
-from joblib import load
-import logging
-import traceback
+import joblib
 
-# Optional: if you want to cache in Streamlit, you can import here
-try:
-    import streamlit as st
-    USE_STREAMLIT_CACHE = True
-except ImportError:
-    st = None
-    USE_STREAMLIT_CACHE = False
-
-# Setup logging
-logging.basicConfig(
-    filename='activity.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-
-MODEL_ADULT_PATH = "artifacts/model_xgb_adult.joblib"
-MODEL_YOUNG_PATH = "artifacts/model_linear_young.joblib"
-SCALER_ADULT_PATH = "artifacts/scaler_rest.joblib"
-SCALER_YOUNG_PATH = "artifacts/scaler_linear_young.joblib"
-
-# Lookup tables
-plans = {'Bronze': 1, 'Silver': 2, 'Gold': 3}
-risk = {
-    "Diabetes": 6, "High blood pressure": 6, "Thyroid": 6,
-    "Heart disease": 8, "No Disease": 1
-}
-bmi_category_score = {"Normal": 2, "Underweight": 1, "Overweight": 3, "Obesity": 4}
-smoking_map = {"No Smoking": 1, "Occasional": 2, "Regular": 3}
+MODEL_YOUNG_PATH = "artifacts/model_young.joblib"
+MODEL_REST_PATH = "artifacts/model_rest.joblib"
+SCALER_YOUNG_PATH = "artifacts/scaler_young.joblib"
+SCALER_REST_PATH = "artifacts/scaler_rest.joblib"
 
 
-def mh(medical_history: str) -> int:
-    """Calculate total disease risk from text."""
-    if not medical_history:
-        return 0
-    mh_lower = medical_history.lower()
-    return sum(score for name, score in risk.items() if name.lower() in mh_lower)
+def load_artifacts():
+    model_young = joblib.load(MODEL_YOUNG_PATH)
+    model_rest = joblib.load(MODEL_REST_PATH)
+    scaler_young = joblib.load(SCALER_YOUNG_PATH)
+    scaler_rest = joblib.load(SCALER_REST_PATH)
+    return model_young, model_rest, scaler_young, scaler_rest
 
 
-def final_Score(medical_history: str, smoking_status: str) -> int:
-    rs = mh(medical_history)
-    return rs * smoking_map.get(smoking_status, 1)
+model_young, model_rest, scaler_young, scaler_rest = load_artifacts()
 
 
-def validate_input(data: dict) -> dict:
-    """Ensure safe defaults and valid values."""
-    data = dict(data)  # copy to avoid mutating caller dict
-    data['number_of_dependants'] = max(0, data.get('number_of_dependants', 0))
-    data['insurance_plan'] = data.get('insurance_plan', 'Bronze')
-    data['smoking_status'] = data.get('smoking_status', 'No Smoking')
-    data['bmi_category'] = data.get('bmi_category', 'Normal')
-    data['gender'] = data.get('gender', 'Male')
-    data['marital_status'] = data.get('marital_status', 'Unmarried')
-    data['region'] = data.get('region', 'Northwest')
-    data['employment_status'] = data.get('employment_status', 'Salaried')
-    data['medical_history'] = data.get('medical_history', 'No Disease')
-    data['income_lakhs'] = data.get('income_lakhs', 0)
-    data['genetical_risk'] = data.get('genetical_risk', 1)
-    data['age'] = data.get('age', 25)
-    return data
+def calculate_normalized_risk(medical_history):
+    risk_scores = {
+        "diabetes": 6,
+        "heart disease": 8,
+        "high blood pressure": 6,
+        "thyroid": 5,
+        "no disease": 0,
+        "none": 0
+    }
+
+    diseases = medical_history.lower().split(" & ")
+    total_risk_score = sum(risk_scores.get(disease, 0) for disease in diseases)
+    normalized_risk_score = total_risk_score / 14
+    return normalized_risk_score
 
 
-def encode_region(df: pd.DataFrame, region: str) -> None:
-    for r in ['Northwest', 'Southeast', 'Southwest']:
-        df[f'region_{r}'] = int(region == r)
-
-
-def encode_employment(df: pd.DataFrame, status: str) -> None:
-    df['employment_status_Salaried'] = int(status == 'Salaried')
-    df['employment_status_Self-Employed'] = int(status == 'Self Employed')
-
-
-def _load_artifacts():
-    """Internal helper: load all models and scalers with good logging."""
-    try:
-        model_adult = load(MODEL_ADULT_PATH)
-        model_young = load(MODEL_YOUNG_PATH)
-        scaler_adult = load(SCALER_ADULT_PATH)
-        scaler_young = load(SCALER_YOUNG_PATH)
-        return model_adult, model_young, scaler_adult, scaler_young
-    except Exception as e:
-        # Log full traceback to help debugging on Streamlit Cloud
-        logging.error("Error loading artifacts: %s", e)
-        logging.error(traceback.format_exc())
-        # Re-raise so Streamlit shows an error
-        raise
-
-
-if USE_STREAMLIT_CACHE:
-    @st.cache_resource
-    def load_artifacts():
-        return _load_artifacts()
-else:
-    # Fallback when not running under Streamlit
-    def load_artifacts():
-        return _load_artifacts()
-
-
-def young(input_data: dict, scaler_young: dict) -> pd.DataFrame:
-    input_data = validate_input(input_data)
-    columns = [
-        'age', 'number_of_dependants', 'smoking_status', 'income_lakhs',
-        'medical_history', 'insurance_plan', 'genetical_risk', 'gender_Male',
-        'marital_status_Unmarried', 'region_Northwest', 'region_Southeast',
-        'region_Southwest', 'bmi_category_Obesity', 'bmi_category_Overweight',
-        'bmi_category_Underweight', 'employment_status_Salaried',
-        'employment_status_Self-Employed'
-    ]
-
-    df = pd.DataFrame(0, columns=columns, index=[0])
-    df.at[0, 'age'] = input_data['age']
-    df.at[0, 'number_of_dependants'] = input_data['number_of_dependants']
-    df.at[0, 'income_lakhs'] = input_data['income_lakhs']
-    df.at[0, 'insurance_plan'] = plans.get(input_data['insurance_plan'], 1)
-    df.at[0, 'smoking_status'] = {'No Smoking': 0, 'Occasional': 1, 'Regular': 2}.get(
-        input_data['smoking_status'], 0
-    )
-    df.at[0, 'medical_history'] = mh(input_data['medical_history'])
-    df.at[0, 'genetical_risk'] = input_data['genetical_risk']
-    df.at[0, 'gender_Male'] = int(input_data['gender'] == 'Male')
-    df.at[0, 'marital_status_Unmarried'] = int(input_data['marital_status'] == 'Unmarried')
-
-    # Region & employment
-    encode_region(df, input_data['region'])
-    encode_employment(df, input_data['employment_status'])
-
-    # BMI categories
-    for cat in ['Obesity', 'Overweight', 'Underweight']:
-        df[f'bmi_category_{cat}'] = int(input_data.get('bmi_category', 'Normal') == cat)
-
-    scaler = scaler_young['scaler']
-    cols = scaler_young['cols_to_scale']
-    df[cols] = scaler.transform(df[cols])
-    return df
-
-
-def adult(input_data: dict, scaler_adult: dict) -> pd.DataFrame:
-    input_data = validate_input(input_data)
-    columns = [
-        'age', 'number_of_dependants', 'bmi_category', 'income_lakhs',
-        'insurance_plan', 'score', 'gender_Male', 'region_Northwest',
-        'region_Southeast', 'region_Southwest', 'marital_status_Unmarried',
+def preprocess_input(input_dict):
+    expected_columns = [
+        'age', 'number_of_dependants', 'income_lakhs', 'insurance_plan', 'genetical_risk', 'normalized_risk_score',
+        'gender_Male', 'region_Northwest', 'region_Southeast', 'region_Southwest', 'marital_status_Unmarried',
+        'bmi_category_Obesity', 'bmi_category_Overweight', 'bmi_category_Underweight',
+        'smoking_status_Occasional', 'smoking_status_Regular',
         'employment_status_Salaried', 'employment_status_Self-Employed'
     ]
 
-    df = pd.DataFrame(0, columns=columns, index=[0])
-    df.at[0, 'age'] = input_data['age']
-    df.at[0, 'number_of_dependants'] = input_data['number_of_dependants']
-    df.at[0, 'bmi_category'] = bmi_category_score.get(input_data['bmi_category'], 2)
-    df.at[0, 'income_lakhs'] = input_data['income_lakhs']
-    df.at[0, 'insurance_plan'] = plans.get(input_data['insurance_plan'], 1)
-    df.at[0, 'score'] = final_Score(input_data['medical_history'], input_data['smoking_status'])
-    df.at[0, 'gender_Male'] = int(input_data['gender'] == 'Male')
-    df.at[0, 'marital_status_Unmarried'] = int(input_data['marital_status'] == 'Unmarried')
+    df = pd.DataFrame(0, columns=expected_columns, index=[0])
 
-    # Region & employment
-    encode_region(df, input_data['region'])
-    encode_employment(df, input_data['employment_status'])
+    insurance_plan_encoding = {'Bronze': 1, 'Silver': 2, 'Gold': 3}
 
-    scaler = scaler_adult['scaler']
-    cols = scaler_adult['cols_to_scale']
-    df[cols] = scaler.transform(df[cols])
+    df['age'] = input_dict.get('Age', 0)
+    df['number_of_dependants'] = input_dict.get('Number of Dependants', 0)
+    df['income_lakhs'] = input_dict.get('Income in Lakhs', 0)
+    df['genetical_risk'] = input_dict.get('Genetical Risk', 1)
+    df['insurance_plan'] = insurance_plan_encoding.get(input_dict.get('Insurance Plan', 'Bronze'), 1)
+
+    if input_dict.get('Gender') == 'Male':
+        df['gender_Male'] = 1
+
+    if input_dict.get('Region') == 'Northwest':
+        df['region_Northwest'] = 1
+    elif input_dict.get('Region') == 'Southeast':
+        df['region_Southeast'] = 1
+    elif input_dict.get('Region') == 'Southwest':
+        df['region_Southwest'] = 1
+
+    if input_dict.get('Marital Status') == 'Unmarried':
+        df['marital_status_Unmarried'] = 1
+
+    if input_dict.get('BMI Category') == 'Obesity':
+        df['bmi_category_Obesity'] = 1
+    elif input_dict.get('BMI Category') == 'Overweight':
+        df['bmi_category_Overweight'] = 1
+    elif input_dict.get('BMI Category') == 'Underweight':
+        df['bmi_category_Underweight'] = 1
+
+    if input_dict.get('Smoking Status') == 'Occasional':
+        df['smoking_status_Occasional'] = 1
+    elif input_dict.get('Smoking Status') == 'Regular':
+        df['smoking_status_Regular'] = 1
+
+    if input_dict.get('Employment Status') == 'Salaried':
+        df['employment_status_Salaried'] = 1
+    elif input_dict.get('Employment Status') == 'Self-Employed':
+        df['employment_status_Self-Employed'] = 1
+
+    df['normalized_risk_score'] = calculate_normalized_risk(input_dict.get('Medical History', 'none'))
+
+    df = handle_scaling(input_dict.get('Age', 0), df)
     return df
 
 
-def predict(input_data: dict) -> float:
-    input_data = validate_input(input_data)
+def handle_scaling(age, df):
+    scaler_object = scaler_young if age <= 25 else scaler_rest
+    cols_to_scale = scaler_object['cols_to_scale']
+    scaler = scaler_object['scaler']
 
-    model_adult, model_young, scaler_adult, scaler_young = load_artifacts()
+    df['income_level'] = 0
+    df[cols_to_scale] = scaler.transform(df[cols_to_scale])
+    df.drop('income_level', axis=1, inplace=True)
 
-    if input_data['age'] <= 25:
-        input_df = young(input_data, scaler_young)
-        model = model_young
-    else:
-        input_df = adult(input_data, scaler_adult)
-        model = model_adult
+    return df
 
-    prediction = model.predict(input_df)
-    logging.info("Input Data:\n%s", input_df.to_string())
-    logging.info("Prediction: %.2f", float(prediction[0]) if hasattr(prediction, "__len__") else float(prediction))
 
-    # Handle both scalar and array predictions
-    return float(prediction[0]) if hasattr(prediction, "__len__") else float(prediction)
+def predict(input_dict):
+    input_df = preprocess_input(input_dict)
+    prediction = (
+        model_young.predict(input_df)
+        if input_dict.get('Age', 0) <= 25
+        else model_rest.predict(input_df)
+    )
+    return int(prediction[0])
